@@ -1,0 +1,112 @@
+---
+- name: Ensure required tooling is installed, validated and logged in
+  hosts: all
+
+  vars:
+    # --- Exact Tool Versions (Pinning) ---
+    git_version: "2.43.5"
+    podman_version: "4.9.4"
+    python_version: "3.11.5"
+    oc_version: "4.14.16"
+
+    # URL di-pin ke rilis spesifik bukan 'stable'
+    oc_cli_download_url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/{{ oc_version }}/openshift-client-linux-{{ oc_version }}.tar.gz"
+
+    git_repo_url: "https://github.com/ansible/ansible-examples.git"
+    git_dest: "/home/{{ ansible_user }}/repo"
+
+    podman_registry_url: "quay.io"
+    podman_registry_username: ""
+    podman_registry_password: ""
+
+    oc_api_url: "https://api.example.com:6443"
+    oc_token: ""
+
+  tasks:
+    # =========================================================================
+    # 02. PRE-VALIDATION INPUTS
+    # =========================================================================
+    - name: Pre-validation input parameters
+      ansible.builtin.assert:
+        that:
+          - git_repo_url is defined and git_repo_url | length > 0
+          - git_dest is defined and git_dest | length > 0
+          - podman_registry_url is defined and podman_registry_url | length > 0
+          - podman_registry_username is defined and podman_registry_username | length > 0
+          - podman_registry_password is defined and podman_registry_password | length > 0
+          - oc_api_url is defined and oc_api_url is match('^https://')
+          - oc_token is defined and oc_token | length > 0
+        fail_msg: "Validasi gagal: Pastikan semua kredensial, URL repository, dan konfigurasi OCP telah diisi sebelum playbook berjalan!"
+        success_msg: "Pre-validation berhasil. Semua parameter wajib telah tersedia."
+
+    # =========================================================================
+    # 03. INSTALLATION WITH PINNED VERSIONS
+    # =========================================================================
+    - name: Install git, podman, and python3 with exact versions
+      ansible.builtin.dnf:
+        name:
+          - "git-{{ git_version }}*"
+          - "podman-{{ podman_version }}*"
+          - "python3-{{ python_version }}*"
+        state: present
+      become: true
+
+    - name: Download pinned oc CLI binary
+      ansible.builtin.get_url:
+        url: "{{ oc_cli_download_url }}"
+        dest: "/tmp/openshift-client-linux-{{ oc_version }}.tar.gz"
+        mode: "0644"
+
+    - name: Extract oc to /usr/local/bin
+      ansible.builtin.unarchive:
+        src: "/tmp/openshift-client-linux-{{ oc_version }}.tar.gz"
+        dest: "/usr/local/bin"
+        remote_src: true
+        mode: "0755"
+      become: true
+
+    # --- Tool Validation Check ---
+    - name: Check versions of all installed tools
+      ansible.builtin.command: "{{ item }}"
+      loop:
+        - git --version
+        - podman --version
+        - python3 --version
+        - oc version --client
+      register: tool_versions
+      changed_when: false
+
+    - name: Show installed versions
+      ansible.builtin.debug:
+        msg: "{{ tool_versions.results | map(attribute='stdout') | list }}"
+
+    # =========================================================================
+    # GIT WORKFLOW
+    # =========================================================================
+    - name: Clone the git repository
+      ansible.builtin.git:
+        repo: "{{ git_repo_url }}"
+        dest: "{{ git_dest }}"
+
+    # =========================================================================
+    # 01. LOGIN (SECRET MASKING)
+    # =========================================================================
+    - name: Log in to the container registry with podman
+      ansible.builtin.command:
+        cmd: "podman login {{ podman_registry_url }} -u {{ podman_registry_username }} --password-stdin"
+        stdin: "{{ podman_registry_password }}"
+      no_log: true # Mencegah password bocor ke stdout / ansible log
+
+    - name: Log in to the OpenShift cluster with oc
+      ansible.builtin.command:
+        cmd: "oc login {{ oc_api_url }} --token={{ oc_token }} --insecure-skip-tls-verify=false"
+      no_log: true # Mencegah token rahasia tercetak di console
+
+    - name: Confirm oc login
+      ansible.builtin.command: oc whoami
+      register: oc_whoami
+      changed_when: false
+
+    - name: Show oc login identity
+      ansible.builtin.debug:
+        msg: "Logged in as {{ oc_whoami.stdout }}"
