@@ -1,6 +1,6 @@
 ---
 - name: Setup environment, developer tooling, and MongoDB
-  hosts: servers
+  hosts: all
   become: false
 
   vars:
